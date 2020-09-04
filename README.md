@@ -7,6 +7,8 @@ for Stage IV cosmic shear surveys, and a hypothetical kinematic lensing survey.
 
 The main file kcut_rs.py contains classes which handle these.
 
+If using this code, please cite [Deshpande, Taylor, & Kitching, 2020](https://arxiv.org/abs/2009.01792)
+
 The module uses the [BiHalofit](http://cosmo.phys.hirosaki-u.ac.jp/takahasi/codes_e.htm) (
 [Takahashi et al., 2020](https://arxiv.org/abs/1911.07886)), [BNT transform](https://github.com/pltaylor16/x-cut)
 ([Taylor et al., 2020](https://arxiv.org/abs/2007.00675)), [CAMB](https://camb.info/)
