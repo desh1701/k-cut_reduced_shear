@@ -5,6 +5,10 @@ reduced shear correction, Bernardeau-Nishimichi-Taruya transform, as
 well as make Fisher and bias forecasts while applying k-cut cosmic shear 
 for Stage IV cosmic shear surveys, and a hypothetical kinematic lensing survey.
 
+This code now also allows the calculation of other corrections to the shear angular power spectra for
+Stage IV surveys. Namely: corrections due to the Doppler shift of source redshifts, and their interaction
+with Intrinsic Alignments.
+
 The main file kcut_rs.py contains classes which handle these.
 
 If using this code, please cite [Deshpande, Taylor, & Kitching, 2020](https://arxiv.org/abs/2009.01792)
