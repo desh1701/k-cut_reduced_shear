@@ -2,7 +2,8 @@
 # FILE:    kcut_rs.py
 # AUTHOR:  A.C. Deshpande
 # PURPOSE: Code to test k-cut required to preserve the validity of reduced
-#          shear for Stage IV experiments.
+#          shear for Stage IV experiments. Can also calculate Doppler-shift
+#          correction for cosmic shear angular power spectra.
 ##############################################################################
 
 # ============================================================================
@@ -13,9 +14,11 @@ import numpy as np
 import camb
 import copy
 import subprocess
+import pickle
 
 from scipy import interpolate
 from scipy import integrate
+from scipy import misc
 from BNT import BNT
 from astropy import units
 from astropy import cosmology
@@ -144,6 +147,7 @@ class ShearObservable:
         if self.verbose is True:
             print('# Computed BNT matrix.')
 
+        self.skdict = None
         self.power = None
         self.power_linear = None
         self.D_growth = None
@@ -609,6 +613,53 @@ class ShearObservable:
                          integrate.quad(self.kern_integral,
                                         a=z, b=bin_max,
                                         args=(z, cur_nz))[0])
+        return W_val
+
+    def kernel_k_dop_like(self, z, ell, bin_index):
+        """
+        Calculates value of the kappa-doppler-like kernel at a given redshift.
+
+        Parameters
+        ----------
+        z: float
+            Redshift at which lensing kernel is being evaluated.
+        ell: float
+            Ell-mode at which kernel is evaluated.
+        bin_index: int
+            Index of redshift bin being evaluated. Indices starts from 1.
+
+        Returns
+        -------
+        float
+            Value of kernel at current redshift.
+        """
+        cur_nz = self.n_funcs[int(bin_index - 1)](z)
+        W_val = ((ell / ((ell + 0.5) ** 2.0)) - (1.0 / (ell + 1.5))) * \
+                cur_nz * self.z_to_chi(z) * ((self.c_light) /
+                                             ((self.z_to_chi(z) ** 2.0) *
+                                              self.Hubble_func(z) *
+                                              (1.0 / (1.0 + z))))
+        return W_val
+
+    def kernel_gamma_dop_like(self, z, bin_index):
+        """
+        Calculates value of the gamma-doppler-like kernel at a given redshift.
+
+        Parameters
+        ----------
+        z: float
+            Redshift at which lensing kernel is being evaluated.
+        bin_index: int
+            Index of redshift bin being evaluated. Indices starts from 1.
+
+        Returns
+        -------
+        float
+            Value of kernel at current redshift.
+        """
+        cur_nz = self.n_funcs[int(bin_index - 1)](z)
+        prefac = 1.5 * ((self.om_m * (self.H0**2.0) / ((self.c_light)**2.0)))
+        W_val = prefac * cur_nz
         return W_val
 
     def c_ell_integrand(self, z, W_i_z, W_j_z, ell):
@@ -1114,7 +1165,7 @@ class ShearObservable:
             solv = 0.0
         return solv
 
-    def del_C(self, l, lind, bin_i_ind, bin_j_ind):
+    def del_C_RS(self, l, lind, bin_i_ind, bin_j_ind):
         """
         Calculates the reduced shear correction for specified bins, at given
         \ell.
@@ -1146,7 +1197,7 @@ class ShearObservable:
                            np.linspace(l + 50, 1.0e5, 100))
 
         for i in range(len(ls)):
-            vals.append([ls[i], l, lind, i, bin_i_ind, bin_j_ind])
+            vals.append([ls[i], lind, i, bin_i_ind, bin_j_ind])
 
         p = Pool(self.proc)
 
@@ -1159,17 +1210,105 @@ class ShearObservable:
 
         return smint1
 
-    def del_c_b_int(self, l_prime, const_l, l1ind, l2ind,
-                    bin_i_ind, bin_j_ind):
+    def del_C_doppler(self, l, lind, bin_i_ind, bin_j_ind):
         """
-        Calculate integrand over \ell for the reduced shear correction.
+        Calculates the doppler correction for specified bins, at given
+        \ell.
+
+        Parameters
+        ----------
+        l: float
+            \ell-mode at which to compute correction.
+        lind: float
+            Index corresponding to \ell-mode in precomputed bispectrum array.
+        bin_i_ind: int
+            Index of bin i. Indices starts from 1.
+        bin_j_ind: int
+            Index of bin j. Indices starts from 1.
+        Returns
+        -------
+        float
+            Value of reduced shear correction.
+        """
+        if self.verbose is True:
+            print('#    Calculating Doppler correction for ell = ', l)
+        vals = []
+        if l >= 51.0:
+            ls = np.append(np.linspace(0.001, l - 50, 100, endpoint=False),
+                           np.linspace(l + 50, 1.0e5, 100))
+
+        else:
+            ls = np.append(np.linspace(0.001, l - 5, 100, endpoint=False),
+                           np.linspace(l + 50, 1.0e5, 100))
+
+        for i in range(len(ls)):
+            vals.append([ls[i], lind, i, bin_i_ind, bin_j_ind, 'Doppler'])
+
+        p = Pool(self.proc)
+
+        returnvals = p.starmap(self.del_c_b_int, vals)
+        p.close()
+        p.join()
+        returnvals = np.array(returnvals)
+
+        smint1 = 2.0 * integrate.trapz(returnvals, ls)
+
+        return smint1
+
+    def del_C_IA_doppler(self, l, lind, bin_i_ind, bin_j_ind):
+        """
+        Calculates the doppler-IA correction for specified bins, at given
+        \ell.
+
+        Parameters
+        ----------
+        l: float
+            \ell-mode at which to compute correction.
+        lind: float
+            Index corresponding to \ell-mode in precomputed bispectrum array.
+        bin_i_ind: int
+            Index of bin i. Indices starts from 1.
+        bin_j_ind: int
+            Index of bin j. Indices starts from 1.
+        Returns
+        -------
+        float
+            Value of reduced shear correction.
+        """
+        if self.verbose is True:
+            print('#    Calculating Doppler correction for ell = ', l)
+        vals = []
+        if l >= 51.0:
+            ls = np.append(np.linspace(0.001, l - 50, 100, endpoint=False),
+                           np.linspace(l + 50, 1.0e5, 100))
+
+        else:
+            ls = np.append(np.linspace(0.001, l - 5, 100, endpoint=False),
+                           np.linspace(l + 50, 1.0e5, 100))
+
+        for i in range(len(ls)):
+            vals.append([ls[i], l, bin_i_ind, bin_j_ind])
+
+        p = Pool(self.proc)
+
+        returnvals = p.starmap(self.del_c_b_int_IA, vals)
+        p.close()
+        p.join()
+        returnvals = np.array(returnvals)
+
+        smint1 = 2.0 * integrate.trapz(returnvals, ls)
+        return smint1
+
+    def del_c_b_int(self, l_prime, l1ind, l2ind,
+                    bin_i_ind, bin_j_ind, correction_type='RS'):
+        """
+        Calculate integrand over \ell for the reduced shear or Doppler
+        correction.
 
         Parameters
         ----------
         l_prime: float
             Dummy integration variable for \ell.
-        const_l: float
-            \ell-mode at which to compute correction.
         l1ind: float
             Index corresponding to \ell_1 in precomputed bispectrum array.
         l2ind: float
@@ -1183,10 +1322,322 @@ class ShearObservable:
         float
             Value of reduced shear correction integrand.
         """
-
-        val = l_prime * self.B_ij(l1ind, l2ind,
-                                  bin_i_ind, bin_j_ind)
+        if correction_type == 'RS':
+            val = l_prime * self.B_ij(l1ind, l2ind,
+                                      bin_i_ind, bin_j_ind)
+        elif correction_type == 'Doppler':
+            val = l_prime * self.B_ij_doppler(l1ind, l2ind,
+                                              bin_i_ind, bin_j_ind, l_prime)
+        else:
+            raise Exception('# Correction type must be RS or Doppler.')
         return val
+
+    def del_c_b_int_IA(self, l_prime, const_l, bin_i_ind, bin_j_ind):
+        """
+        Calculate integrand over \ell for the Doppler-IA correction.
+
+        Parameters
+        ----------
+        l_prime: float
+            Dummy integration variable for \ell.
+        const_l: float
+            \ell-mode at which correction is being evaluated at.
+        bin_i_ind: int
+            Index of bin i. Indices starts from 1.
+        bin_j_ind: int
+            Index of bin j. Indices starts from 1.
+        Returns
+        -------
+        float
+            Value of Doppler-IA correction integrand.
+        """
+
+        val1 = l_prime * self.B_ij_IA(const_l, l_prime, bin_i_ind, bin_j_ind)
+        return val1
+
+    def B_ij_IA(self, l1, l2, bin_i, bin_j):
+        """
+        Calculates the IA-Doppler bispectrum.
+
+        Parameters
+        ----------
+        l1: float
+            First \ell side of bispectrum triangle.
+        l2: float
+            Second \ell side of bispectrum triangle.
+        bin_i: int
+            Index of bin i. Indices starts from 1.
+        bin_j: int
+            Index of bin j. Indices starts from 1.
+        Returns
+        -------
+        float
+            Value of IA-Doppler bispectrum.
+        """
+
+        chis = []
+        for rst in np.arange(0.001, 2.5, 0.1):
+            chis.append(self.z_to_chi(rst))
+        fins = []
+        for item in range(len(chis)):
+            calc = self.B_ij_IA_integrand(chis[item], l1, l2, bin_i, bin_j)
+            fins.append(calc)
+
+        int_val = 0.5 * integrate.trapz(fins, chis)
+        return int_val
+
+    def B_ij_IA_integrand(self, chi, l1, l2, bin_i, bin_j):
+        """
+        Calculates integrand for the IA-Doppler bispectrum.
+
+        Parameters
+        ----------
+        chi: float
+            Comoving distance to be integrated over.
+        l1: float
+            First \ell side of bispectrum triangle.
+        l2: float
+            Second \ell side of bispectrum triangle.
+        bin_i: int
+            Index of bin i. Indices starts from 1.
+        bin_j: int
+            Index of bin j. Indices starts from 1.
+        Returns
+        -------
+        float
+            Value of IA-Doppler bispectrum integrand.
+        """
+        W_i_kv = self.kernel_k_dop_like(self.chi_to_z(chi), l2, bin_i)
+        W_j_kv = self.kernel_k_dop_like(self.chi_to_z(chi), l2, bin_j)
+
+        W_i_gv = self.kernel_gamma_dop_like(self.chi_to_z(chi), bin_i)
+        W_j_gv = self.kernel_gamma_dop_like(self.chi_to_z(chi), bin_j)
+
+        dz_dx = misc.derivative(self.chi_to_z, x0=chi)
+        n_i = self.n_funcs[int(bin_i-1)](self.chi_to_z(chi)) * dz_dx
+        n_j = self.n_funcs[int(bin_j - 1)](self.chi_to_z(chi)) * dz_dx
+
+        val = (1.0 / (chi ** 4.0)) * \
+              ((W_i_kv * W_i_gv * n_j) + (W_j_kv * W_j_gv * n_i)) * \
+              self.B_IA_gen(l1, l2, chi)
+        return val
+
+    def B_IA_gen(self, l1, l2, chi):
+        """
+        Calculates the IA bispectrum.
+
+        Parameters
+        ----------
+        l1: float
+            First \ell side of bispectrum triangle.
+        l2: float
+            Second \ell side of bispectrum triangle.
+        chi: float
+            Comoving distance.
+        Returns
+        -------
+        float
+            Value of IA bispectrum.
+        """
+
+        k1 = (l1 + 0.5)/chi
+        k2 = (l2 + 0.5)/chi
+        pow1 = (-self.A_IA * self.C_IA * (self.om_m /
+                                          self.D_growth(self.chi_to_z(chi))))\
+               * self.power(k1, self.chi_to_z(chi))
+        pow2 = (-self.A_IA * self.C_IA * (self.om_m /
+                                          self.D_growth(self.chi_to_z(chi))))\
+               * self.power(k2, self.chi_to_z(chi))
+
+        knl = self.skdict['{:d}'.format(int(10.0 *
+                                            (self.chi_to_z(chi) + 1)))][1]
+
+        in_vals = np.append(np.linspace(0.0, np.pi, 50, endpoint=False),
+                            np.linspace(np.pi, 2.0 * np.pi, 50, endpoint=True))
+
+        F13_vals = []
+        F23_vals = []
+        for item in in_vals:
+            F13_vals.append(
+                self.F_eff13_gen(item, k1, knl, l1, l2, chi))
+            F23_vals.append(
+                self.F_eff23_gen(item, k2, knl, l1, l2, chi))
+
+        B = ((2.0 * (2.0 / 7.0) * (np.pi / 2.0) * pow1
+              * pow2) + (2.0 * integrate.trapz(F13_vals, in_vals)) +
+             (2.0 * integrate.trapz(F23_vals, in_vals))) / (
+                        (2.0 * np.pi) ** 2.0)
+        return B
+
+    def F_eff13_gen(self, phi, k1, knl, l1, l2, chi):
+        """
+        Evaluation of F_eff fitting function from Scoccimaro, Couchman 2001
+        (https://doi.org/10.1046/j.1365-8711.2001.04281.x)
+        in the case of l, -l-'.
+
+        Parameters
+        ----------
+        phi: float
+            Angle of l2 w.r.t to l1.
+        k1: float
+            k-mode corresponding to l1.
+        s8: float
+            Sigma_8 cosmological parameter; amplitude of matter power spectrum.
+        knl: float
+            Scale of non-linearities.
+        l1: float
+            First \ell side of bispectrum triangle.
+        l2: float
+            Second \ell side of bispectrum triangle.
+        chi: float
+            Comoving distance.
+
+        Returns
+        -------
+        float
+            Value of fitting function.
+        """
+
+        pow1 = self.power(k1, chi)
+
+        l3 = np.sqrt(l1 ** 2.0 + l2 ** 2.0 + 2.0 * l1 * l2 * np.cos(phi))
+        k3 = (l3 + 0.5) / chi
+
+        pow3 = (-self.A_IA * self.C_IA * (self.om_m / self.D_growth(
+            self.chi_to_z(chi)))) * self.power(k3, self.chi_to_z(chi))
+
+        ang_3 = np.pi + np.arctan2(l2 * np.sin(phi), l1 + l2 * np.cos(phi))
+
+        val = (((5.0 / 7.0) * self.a_bispec_IA(k1, knl) * self.a_bispec_IA(k3, knl)) +
+               (0.5 * (k1 / k3 + k3 / k1) * self.b_bispec_IA(k1, knl) * self.b_bispec_IA(
+                   k3, knl) * np.cos(ang_3)) +
+               ((2.0 / 7.0) * self.c_bispec_IA(k1, knl) * self.c_bispec_IA(k3, knl) * (
+                           np.cos(ang_3) ** 2.0))) * np.cos(2.0 * phi) * \
+              pow1 * pow3
+
+        return val
+
+    def F_eff23_gen(self, phi, k2, knl, l1, l2, chi):
+        """
+        Evaluation of bispectrum fitting function F_eff from Scoccimaro,
+        Couchman 2001 (https://doi.org/10.1046/j.1365-8711.2001.04281.x)
+        in the case of l', -l-'.
+
+        Parameters
+        ----------
+        phi: float
+            Angle of l2 w.r.t to l1.
+        k2: float
+            k-mode corresponding to l2.
+        s8: float
+            Sigma_8 cosmological parameter; amplitude of matter power spectrum.
+        knl: float
+            Scale of non-linearities.
+        l1: float
+            First \ell side of bispectrum triangle.
+        l2: float
+            Second \ell side of bispectrum triangle.
+        chi: float
+            Comoving distance.
+
+        Returns
+        -------
+        float
+            Value of fitting function.
+        """
+
+        pow2 = self.power(k2, chi)
+
+        l3 = np.sqrt(l1 ** 2.0 + l2 ** 2.0 + 2.0 * l1 * l2 * np.cos(phi))
+
+        k3 = (l3 + 0.5) / chi
+
+        pow3 = (-self.A_IA * self.C_IA *
+                (self.om_m/self.D_growth(self.chi_to_z(chi))))\
+               * self.power(k3, self.chi_to_z(chi))
+
+        ang_3 = np.pi + np.arctan2(l2 * np.sin(phi), l1 + l2 * np.cos(phi))
+
+        val = (((5.0/7.0) * self.a_bispec_IA(k2, knl) * self.a_bispec_IA(k3, knl)) +
+               (0.5 * (k3/k2 + k2/k3) * self.b_bispec_IA(k3, knl) * self.b_bispec_IA(k2, knl) * np.cos(phi+np.pi-ang_3)) +
+               (2.0 / 7.0)*(self.c_bispec_IA(k3, knl) * self.c_bispec_IA(k2, knl) * (np.cos(phi+np.pi-ang_3)**2.0))) * np.cos(2.0*phi) * \
+              pow2 * pow3
+
+        return val
+
+    def a_bispec_IA(self, k, knl):
+        """
+        Evaluation of bispectrum fitting function a from Scoccimaro,
+        Couchman 2001 (https://doi.org/10.1046/j.1365-8711.2001.04281.x)
+
+        Parameters
+        ----------
+        k: float
+            k-mode at which to evaluate fitting function.
+        knl: float
+            Scale of non-linearities.
+
+        Returns
+        -------
+        float
+            Value of fitting function.
+        """
+        q = k / (knl)
+        Q3 = (4.0 - (2.0 ** self.ns)) / (1.0 + (2.0 ** (self.ns + 1.0)))
+
+        a_val = (1.0 + (self.s8 ** -0.2) * np.sqrt(0.7 * Q3) * (q / 4.0) ** (
+                    self.ns + 3.5)) / (1.0 + (q / 4.0) ** (self.ns + 3.5))
+        return a_val
+
+    def b_bispec_IA(self, k, knl):
+        """
+        Evaluation of bispectrum fitting function b from Scoccimaro,
+        Couchman 2001 (https://doi.org/10.1046/j.1365-8711.2001.04281.x)
+
+        Parameters
+        ----------
+        k: float
+            k-mode at which to evaluate fitting function.
+        knl: float
+            Scale of non-linearities.
+
+        Returns
+        -------
+        float
+            Value of fitting function.
+        """
+        q = k / (knl)
+
+        b_val = (1.0 + (0.4 * (self.ns + 3.0) * q ** (self.ns + 3.0))) / (
+                    1.0 + q ** (self.ns + 3.5))
+        return b_val
+
+    def c_bispec_IA(self, k, knl):
+        """
+        Evaluation of bispectrum fitting function c from Scoccimaro,
+        Couchman 2001 (https://doi.org/10.1046/j.1365-8711.2001.04281.x)
+
+        Parameters
+        ----------
+        k: float
+            k-mode at which to evaluate fitting function.
+        knl: float
+            Scale of non-linearities.
+
+        Returns
+        -------
+        float
+            Value of fitting function.
+        """
+        q = k / (knl)
+
+        if q == 0.0:
+            c_val = 0.0
+        else:
+            c_val = (1.0 + (4.5 / ((1.5 + (self.ns + 3.0) ** 4.0) * (
+                        (2.0 * q) ** (self.ns + 3.0))))) / (
+                                1.0 + (2.0 * q) ** (self.ns + 3.5))
+        return c_val
 
     def B_ij(self, l1ind, l2ind, bin_i_ind, bin_j_ind):
         """
@@ -1253,20 +1704,111 @@ class ShearObservable:
                 W_i + W_j) * self.b_mat_ld[l1ind, l2ind, chiind]
         return val
 
-    def compute_RS_correction_matrix(self):
+    def B_ij_doppler(self, l1ind, l2ind, bin_i_ind, bin_j_ind, l_prime):
         """
-        Calculates the 10x10 matrix of reduced shear corrections for each bin,
+        Calculate the Doppler correction bispectrum for bins i and j,
+        at given \ell, \ell_prime.
+
+        Parameters
+        ----------
+        l1ind: float
+            Index corresponding to \ell_1 in precomputed bispectrum array.
+        l2ind: float
+            Index corresponding to \ell_2 in precomputed bispectrum array.
+        bin_i_ind: int
+            Index of bin i. Indices starts from 1.
+        bin_j_ind: int
+            Index of bin j. Indices starts from 1.
+        l_prime: float
+            \ell-mode being integrated over in correction calculation.
+        Returns
+        -------
+        float
+            Value of Doppler bispectrum.
+        """
+
+        chis = []
+        for rst in np.arange(0.001, 2.5, 0.1):
+            chis.append(self.z_to_chi(rst))
+        fins = []
+        for item in range(len(chis)):
+            calc = self.B_ij_integrand_doppler(chis[item], l1ind, l2ind, item,
+                                               bin_i_ind, bin_j_ind, l_prime)
+            fins.append(calc)
+
+        int_val = 0.5 * integrate.trapz(fins, chis)
+        return int_val
+
+    def B_ij_integrand_doppler(self, chi, l1ind, l2ind, chiind,
+                               bin_i_ind, bin_j_ind, l_prime):
+        """
+        Calculate the integrand of the Doppler-correction bispectrum for bins
+        i and j, at given \ell, \ell_prime.
+
+        Parameters
+        ----------
+        chi: float
+            Comoving distance, to be integrated over.
+        l1ind: int
+            Index corresponding to \ell_1 in precomputed bispectrum array.
+        l2ind: int
+            Index corresponding to \ell_2 in precomputed bispectrum array.
+        chiind: int
+            Index corresponding to chi in precomputed bispectrum array.
+        bin_i_ind: int
+            Index of bin i. Indices starts from 1.
+        bin_j_ind: int
+            Index of bin j. Indices starts from 1.
+        l_prime: float
+            \ell-mode being integrated over in correction calculation.
+        Returns
+        -------
+        float
+            Value of Doppler bispectrum integrand.
+        """
+        W_i = self.kernel_gamma(self.chi_to_z(chi), bin_index=bin_i_ind)
+        W_j = self.kernel_gamma(self.chi_to_z(chi), bin_index=bin_j_ind)
+
+        W_i_kv = self.kernel_k_dop_like(self.chi_to_z(chi), l_prime, bin_i_ind)
+        W_j_kv = self.kernel_k_dop_like(self.chi_to_z(chi), l_prime, bin_j_ind)
+
+        W_i_gv = self.kernel_gamma_dop_like(self.chi_to_z(chi), bin_i_ind)
+        W_j_gv = self.kernel_gamma_dop_like(self.chi_to_z(chi), bin_j_ind)
+
+        val = (1.0 / (chi ** 4.0)) * \
+              ((W_i_kv * W_i_gv * W_j) + (W_j_kv * W_j_gv * W_i)) * \
+              self.b_mat_ld[l1ind, l2ind, chiind]
+        return val
+
+    def compute_correction_matrix(self, correction_type='RS'):
+        """
+        Calculates the 10x10 matrix of requested corrections for each bin,
         for each requested \ell-mode.
 
         Parameters
         ----------
-        None.
+        correction_type: str
+            Type of correction to compute: 'RS' for reduced shear, 'Doppler'
+            for basic Doppler-shft correction, and 'IA-Doppler' for the
+            Doppler-IA correction term.
 
         Returns
         -------
         array, array
             Standard and BNT transformed reduced shear correction matrices.
         """
+        if correction_type == 'RS':
+            d_func = self.del_C_RS
+        elif correction_type == 'Doppler':
+            d_func = self.del_C_doppler
+        elif correction_type == 'IA-Doppler':
+            d_func = self.del_C_IA_doppler
+            with open('./temp_io/m_s8_knl.pkl', 'rb') as inth:
+                sk_dict = pickle.load(inth)
+            self.skdict = sk_dict
+        else:
+            raise Exception('# Correction type must be RS or Doppler.')
+
         dc_arr = np.zeros((200, 10, 10))
         dc_arr_BNT = np.zeros((200, 10, 10))
         full_ells = np.logspace(1.0, 3.7, 200)
@@ -1275,12 +1817,12 @@ class ShearObservable:
             for bin_j in range(1, 11):
                 if bin_j >= bin_i:
                     if self.verbose is True:
-                        print('# Computing RS corr bin i:', bin_i, ', bin j:',
-                              bin_j)
+                        print('# Computing {:s} corr bin i:'.format(
+                            correction_type), bin_i, ', bin j:', bin_j)
                     cur_dcs = []
                     for ell_ind in range(len(self.t_ells)):
-                        dc = self.del_C(l=self.t_ells[ell_ind], lind=ell_ind,
-                                        bin_i_ind=bin_i, bin_j_ind=bin_j)
+                        dc = d_func(l=self.t_ells[ell_ind], lind=ell_ind,
+                                           bin_i_ind=bin_i, bin_j_ind=bin_j)
                         cur_dcs.append(dc)
                     if self.verbose:
                         print('#    Initial values computed.')
@@ -1709,7 +2251,7 @@ class Fishercalc:
         print(zero_dict)
         return zero_dict
 
-    def bias_calc(self, alph, cat='def'):
+    def bias_calc(self, alph, cat='def', correction='RS'):
         """
         Computes the cosmological parameter bias from neglecting the reduced
         shear correction for either the standard or BNT transformed
@@ -1728,11 +2270,23 @@ class Fishercalc:
         float
             Value of bias.
         """
+        if self.survey == 'kinematic' and correction != 'RS':
+            raise Exception('# Only the reduced shear correction can be'
+                            'computed for a kinematic survey.')
+        if cat == 'BNT' and correction != 'RS':
+            raise Exception('# k-cut BNT analysis is currently only supported'
+                            'for the Reduced Shear correction.')
         if alph not in ['Om','Ob', 'w0', 'wa', 'h', 'ns', 'sigma_8']:
             raise Exception('Invalid Parameter to calculate biases for')
         if self.survey == 'photometric':
             f_sky = 15000 * (np.pi / 180) ** 2 / (4 * np.pi)
             if cat == 'def':
+                if correction == 'RS':
+                    file_name = 'del_cls_fiducial.npy'
+                elif correction == 'Doppler':
+                    file_name = 'del_cls_doppler.npy'
+                elif correction == 'Doppler-IA':
+                    file_name = 'del_cls_IA_doppler.npy'
                 param_dict = {'Om': [0, './c_ells_default/dcls_default_dom.npy'],
                               'Ob': [1, './c_ells_default/dcls_default_dob.npy'],
                               'w0': [2, './c_ells_default/dcls_default_dw0.npy'],
@@ -1740,7 +2294,7 @@ class Fishercalc:
                               'h': [4, './c_ells_default/dcls_default_dh.npy'],
                               'ns': [5, './c_ells_default/dcls_default_dns.npy'],
                               'sigma_8': [6, './c_ells_default/dcls_default_ds8.npy']}
-                RS_corr_arr = np.load('./c_ells_default/del_cls_fiducial.npy')
+                RS_corr_arr = np.load('./c_ells_default/' + file_name)
                 cls_mat = np.load('./c_ells_default/cls_fiducial.npy')
 
             elif cat == 'BNT':
@@ -1866,4 +2420,3 @@ if __name__ == '__main__':
               fishinst.bias_calc(list(zero_dict.keys())[i], 'BNT'),
               fishinst.bias_calc(list(zero_dict.keys())[i], 'BNT') /
               list(zero_dict.values())[i])
-
