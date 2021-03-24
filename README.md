@@ -11,7 +11,7 @@ with Intrinsic Alignments.
 
 The main file kcut_rs.py contains classes which handle these.
 
-If using this code, please cite [Deshpande, Taylor, & Kitching, 2020](https://arxiv.org/abs/2009.01792)
+If using this code to compute k-cut reduced shear, please cite [Deshpande, Taylor, & Kitching, 2020](https://arxiv.org/abs/2009.01792), if using it to compute the Doppler-shift correction for cosmic shear, please cite [Deshpande & Kitching, 2021](https://arxiv.org/abs/2103.11936).
 
 The module uses the [BiHalofit](http://cosmo.phys.hirosaki-u.ac.jp/takahasi/codes_e.htm) (
 [Takahashi et al., 2020](https://arxiv.org/abs/1911.07886)), [BNT transform](https://github.com/pltaylor16/x-cut)
